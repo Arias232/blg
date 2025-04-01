@@ -28,7 +28,8 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
         
-         - name: Install eksctl 
+      # Install eksctl tool for managing EKS clusters
+      - name: Install eksctl 
         run: |
           ARCH=amd64
           PLATFORM=$(uname -s)_$ARCH
@@ -78,11 +79,3 @@ jobs:
       # Execute the script to create the EKS cluster
       - name: Execute script
         run: ./eksctl/create_cluster_green.sh
-
-  # Fixing the deprecation warning for setting output
-  Set-cluster-output:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create output file
-        run: |
-          echo "CLUSTER_STATUS=success" >> $GITHUB_ENV
