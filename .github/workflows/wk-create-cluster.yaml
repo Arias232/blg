@@ -17,11 +17,6 @@ jobs:
   Create:
     runs-on: ubuntu-latest
     steps:
-
-      - name: Delete existing cluster (if exists)
-        run: |
-          eksctl delete cluster --region=us-east-1 --name=K8S-Blue-Green || true
-
       - name: Check out code
         uses: actions/checkout@v2
       
@@ -32,14 +27,51 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-        
+      
       # Install eksctl tool for managing EKS clusters
       - name: Install eksctl
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
           eksctl version
+      
+      # Check and clean CloudFormation stacks if they exist
+      - name: Check and clean CloudFormation stacks
+        run: |
+          echo "Checking for existing CloudFormation stacks..."
+          if aws cloudformation describe-stacks --stack-name eksctl-K8S-Blue-Green-cluster --region us-east-1 2>&1; then
+            echo "Found existing stack. Deleting it..."
+            aws cloudformation delete-stack --stack-name eksctl-K8S-Blue-Green-cluster --region us-east-1
+            echo "Waiting for stack deletion to complete..."
+            aws cloudformation wait stack-delete-complete --stack-name eksctl-K8S-Blue-Green-cluster --region us-east-1
+            echo "Stack deletion completed."
+          else
+            echo "Stack not found or already deleted."
+          fi
           
+          # Check for nodegroup stack as well
+          if aws cloudformation describe-stacks --stack-name eksctl-K8S-Blue-Green-nodegroup-ng-4d190b52 --region us-east-1 2>&1; then
+            echo "Found existing nodegroup stack. Deleting it..."
+            aws cloudformation delete-stack --stack-name eksctl-K8S-Blue-Green-nodegroup-ng-4d190b52 --region us-east-1
+            echo "Waiting for nodegroup stack deletion to complete..."
+            aws cloudformation wait stack-delete-complete --stack-name eksctl-K8S-Blue-Green-nodegroup-ng-4d190b52 --region us-east-1
+            echo "Nodegroup stack deletion completed."
+          else
+            echo "Nodegroup stack not found or already deleted."
+          fi
+          
+          # Extra wait time to ensure all resources are properly released
+          echo "Adding additional wait time to ensure resources are properly released..."
+          sleep 60
+      
+      # Force delete the EKS cluster if it exists
+      - name: Force delete existing cluster (if exists)
+        run: |
+          echo "Attempting to delete any existing EKS cluster..."
+          eksctl delete cluster --region=us-east-1 --name=K8S-Blue-Green --force || true
+          echo "Adding additional wait time after cluster deletion attempt..."
+          sleep 30
+      
       # Make the script executable
       - name: Make script executable
         run: chmod +x eksctl/create_cluster.sh
@@ -47,3 +79,10 @@ jobs:
       # Execute the script to create the EKS cluster
       - name: Execute script
         run: ./eksctl/create_cluster.sh
+      
+      # Verify cluster creation
+      - name: Verify cluster creation
+        run: |
+          echo "Verifying cluster creation..."
+          eksctl get cluster --name=K8S-Blue-Green --region=us-east-1
+          echo "Cluster verification completed."
