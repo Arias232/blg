@@ -17,6 +17,11 @@ jobs:
   Create:
     runs-on: ubuntu-latest
     steps:
+
+      - name: Delete existing cluster (if exists)
+        run: |
+          eksctl delete cluster --region=us-east-1 --name=K8S-Blue-Green || true
+
       - name: Check out code
         uses: actions/checkout@v2
       
