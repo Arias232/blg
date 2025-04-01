@@ -1,0 +1,95 @@
+name: Cleanup AWS Resources
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  Cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Clean CloudFormation stacks
+        run: |
+          # Listar stacks relacionados con eksctl
+          echo "Listing eksctl CloudFormation stacks..."
+          STACKS=$(aws cloudformation list-stacks --stack-status-filter CREATE_FAILED ROLLBACK_COMPLETE ROLLBACK_FAILED DELETE_FAILED --query "StackSummaries[?contains(StackName, 'eksctl')].StackName" --output text)
+          
+          # Eliminar cada stack encontrado
+          for STACK in $STACKS; do
+            echo "Deleting stack $STACK..."
+            aws cloudformation delete-stack --stack-name $STACK
+            echo "Waiting for stack deletion to complete..."
+            aws cloudformation wait stack-delete-complete --stack-name $STACK
+          done
+      
+      - name: Clean Internet Gateways and VPCs
+        run: |
+          # Obtener VPCs que no son la VPC por defecto
+          echo "Listing non-default VPCs..."
+          VPC_IDS=$(aws ec2 describe-vpcs --query "Vpcs[?IsDefault==\`false\`].VpcId" --output text)
+          
+          for VPC_ID in $VPC_IDS; do
+            echo "Processing VPC: $VPC_ID"
+            
+            # Obtener Internet Gateways asociados
+            IGW_IDS=$(aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=$VPC_ID --query "InternetGateways[*].InternetGatewayId" --output text)
+            
+            for IGW_ID in $IGW_IDS; do
+              echo "Detaching Internet Gateway $IGW_ID from VPC $VPC_ID..."
+              aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+              
+              echo "Deleting Internet Gateway $IGW_ID..."
+              aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
+            done
+            
+            # Eliminar subredes
+            SUBNET_IDS=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID --query "Subnets[*].SubnetId" --output text)
+            for SUBNET_ID in $SUBNET_IDS; do
+              echo "Deleting Subnet $SUBNET_ID..."
+              aws ec2 delete-subnet --subnet-id $SUBNET_ID
+            done
+            
+            # Eliminar tablas de rutas (excepto la principal)
+            RT_IDS=$(aws ec2 describe-route-tables --filters Name=vpc-id,Values=$VPC_ID --query "RouteTables[?Associations[0].Main!=\`true\`].RouteTableId" --output text)
+            for RT_ID in $RT_IDS; do
+              echo "Deleting Route Table $RT_ID..."
+              aws ec2 delete-route-table --route-table-id $RT_ID
+            done
+            
+            # Eliminar grupos de seguridad (excepto el default)
+            SG_IDS=$(aws ec2 describe-security-groups --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[?GroupName!=\`default\`].GroupId" --output text)
+            for SG_ID in $SG_IDS; do
+              echo "Deleting Security Group $SG_ID..."
+              aws ec2 delete-security-group --group-id $SG_ID
+            done
+            
+            # Eliminar NAT Gateways
+            NAT_IDS=$(aws ec2 describe-nat-gateways --filter Name=vpc-id,Values=$VPC_ID --query "NatGateways[*].NatGatewayId" --output text)
+            for NAT_ID in $NAT_IDS; do
+              echo "Deleting NAT Gateway $NAT_ID..."
+              aws ec2 delete-nat-gateway --nat-gateway-id $NAT_ID
+            done
+            
+            # Esperar a que los NAT Gateways sean eliminados
+            if [ ! -z "$NAT_IDS" ]; then
+              echo "Waiting for NAT Gateways to be deleted..."
+              sleep 60
+            fi
+            
+            # Finalmente, eliminar la VPC
+            echo "Deleting VPC $VPC_ID..."
+            aws ec2 delete-vpc --vpc-id $VPC_ID
+          done

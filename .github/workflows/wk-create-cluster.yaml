@@ -1,88 +1,120 @@
 name: Create EKS Cluster on AWS
 
-# Trigger the workflow manually
 on:
   workflow_dispatch:
+    inputs:
+      aws_region:
+        description: 'AWS Region to deploy to'
+        required: true
+        default: 'us-west-2'
+        type: choice
+        options:
+          - us-east-1
+          - us-east-2
+          - us-west-1
+          - us-west-2
+          - eu-west-1
+          - eu-central-1
 
-# Define environment variables using GitHub secrets
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ github.event.inputs.aws_region }}
+  CLUSTER_NAME: K8S-Blue-Green-${{ github.run_id }}
 
-# Define permissions for accessing AWS resources
 permissions:
   id-token: write
-  contents: read    # This is required for actions/checkout@v3
+  contents: read
 
 jobs:
-  Create:
+  Cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code
-        uses: actions/checkout@v2
-      
-      # Configure AWS credentials using assumed role
-      - name: 'Configure AWS credentials'
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       
-      # Install eksctl tool for managing EKS clusters
       - name: Install eksctl
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
           eksctl version
       
-      # Check and clean CloudFormation stacks if they exist
-      - name: Check and clean CloudFormation stacks
+      - name: List and cleanup failed EKS clusters
         run: |
-          echo "Checking for existing CloudFormation stacks..."
-          if aws cloudformation describe-stacks --stack-name eksctl-K8S-Blue-Green-cluster --region us-east-1 2>&1; then
-            echo "Found existing stack. Deleting it..."
-            aws cloudformation delete-stack --stack-name eksctl-K8S-Blue-Green-cluster --region us-east-1
-            echo "Waiting for stack deletion to complete..."
-            aws cloudformation wait stack-delete-complete --stack-name eksctl-K8S-Blue-Green-cluster --region us-east-1
-            echo "Stack deletion completed."
-          else
-            echo "Stack not found or already deleted."
-          fi
+          # Intentar obtener clusters existentes
+          echo "Listing existing EKS clusters..."
+          CLUSTERS=$(aws eks list-clusters --query "clusters" --output text || echo "")
           
-          # Check for nodegroup stack as well
-          if aws cloudformation describe-stacks --stack-name eksctl-K8S-Blue-Green-nodegroup-ng-4d190b52 --region us-east-1 2>&1; then
-            echo "Found existing nodegroup stack. Deleting it..."
-            aws cloudformation delete-stack --stack-name eksctl-K8S-Blue-Green-nodegroup-ng-4d190b52 --region us-east-1
-            echo "Waiting for nodegroup stack deletion to complete..."
-            aws cloudformation wait stack-delete-complete --stack-name eksctl-K8S-Blue-Green-nodegroup-ng-4d190b52 --region us-east-1
-            echo "Nodegroup stack deletion completed."
+          # Si hay clusters, intentar eliminarlos
+          if [ -n "$CLUSTERS" ]; then
+            for CLUSTER in $CLUSTERS; do
+              echo "Found cluster: $CLUSTER"
+              if [[ $CLUSTER == K8S-Blue-Green* ]]; then
+                echo "Attempting to delete cluster: $CLUSTER"
+                eksctl delete cluster --region ${{ env.AWS_REGION }} --name $CLUSTER --wait || true
+              fi
+            done
           else
-            echo "Nodegroup stack not found or already deleted."
+            echo "No existing clusters found"
           fi
-          
-          # Extra wait time to ensure all resources are properly released
-          echo "Adding additional wait time to ensure resources are properly released..."
-          sleep 60
+        continue-on-error: true
       
-      # Force delete the EKS cluster if it exists
-      - name: Force delete existing cluster (if exists)
+      - name: Cleanup CloudFormation stacks
         run: |
-          echo "Attempting to delete any existing EKS cluster..."
-          eksctl delete cluster --region=us-east-1 --name=K8S-Blue-Green --force || true
-          echo "Adding additional wait time after cluster deletion attempt..."
-          sleep 30
-      
-      # Make the script executable
-      - name: Make script executable
-        run: chmod +x eksctl/create_cluster.sh
+          # Listar stacks relacionados con eksctl
+          echo "Listing eksctl CloudFormation stacks..."
+          STACKS=$(aws cloudformation list-stacks --stack-status-filter CREATE_FAILED ROLLBACK_COMPLETE ROLLBACK_FAILED --query "StackSummaries[?contains(StackName, 'eksctl')].StackName" --output text || echo "")
+          
+          # Eliminar cada stack encontrado
+          if [ -n "$STACKS" ]; then
+            for STACK in $STACKS; do
+              echo "Deleting stack $STACK..."
+              aws cloudformation delete-stack --stack-name $STACK || true
+              echo "Waiting for stack deletion..."
+              sleep 30
+            done
+          else
+            echo "No CloudFormation stacks to clean up"
+          fi
+        continue-on-error: true
 
-      # Execute the script to create the EKS cluster
-      - name: Execute script
-        run: ./eksctl/create_cluster.sh
+  Create:
+    needs: Cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
       
-      # Verify cluster creation
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Install eksctl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version
+      
+      - name: Create EKS cluster using eksctl
+        run: |
+          echo "Creating EKS cluster with dynamic name: ${{ env.CLUSTER_NAME }}"
+          eksctl create cluster \
+            --name ${{ env.CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --version 1.29 \
+            --node-type t3.medium \
+            --nodes 2 \
+            --nodes-min 1 \
+            --nodes-max 3 \
+            --managed
+      
       - name: Verify cluster creation
         run: |
           echo "Verifying cluster creation..."
-          eksctl get cluster --name=K8S-Blue-Green --region=us-east-1
+          eksctl get cluster --name=${{ env.CLUSTER_NAME }} --region=${{ env.AWS_REGION }}
           echo "Cluster verification completed."
